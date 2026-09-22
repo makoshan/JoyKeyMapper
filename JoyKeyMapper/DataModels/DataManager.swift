@@ -6,7 +6,9 @@
 //  Copyright © 2019 DarkHorse. All rights reserved.
 //
 
+import AppKit
 import CoreData
+import InputMethodKit
 import JoyConSwift
 
 enum StickType: String {
@@ -209,7 +211,24 @@ class DataManager: NSObject {
         }
         
         keyConfig.keyMaps = []
-        
+
+        func addKeyMap(button: String, keyCode: Int, modifiers: NSEvent.ModifierFlags = []) {
+            let km = self.createKeyMap()
+            km.button = button
+            km.keyCode = Int16(keyCode)
+            km.modifiers = Int32(modifiers.rawValue)
+            km.isEnabled = true
+            keyConfig.addToKeyMaps(km)
+        }
+
+        addKeyMap(button: "A", keyCode: kVK_ANSI_1, modifiers: .control)
+        addKeyMap(button: "R", keyCode: kVK_Tab, modifiers: .command)
+        addKeyMap(button: "ZR", keyCode: kVK_ANSI_Grave, modifiers: .command)
+        addKeyMap(button: "Up", keyCode: kVK_UpArrow)
+        addKeyMap(button: "Down", keyCode: kVK_DownArrow)
+        addKeyMap(button: "Left", keyCode: kVK_LeftArrow)
+        addKeyMap(button: "Right", keyCode: kVK_RightArrow)
+
         return keyConfig
     }
 

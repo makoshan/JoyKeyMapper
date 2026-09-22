@@ -62,6 +62,17 @@ class GameController {
     
     var lastAccess: Date? = nil
     var timer: Timer? = nil
+
+    // IMU pickup / shake detection
+    private var imuStillFrames: Int = 0
+    private var imuIsStill: Bool = false
+    private var lastPickupTime: Date = .distantPast
+    private var lastShakeTime: Date = .distantPast
+
+    // Long-press R (Mission Control)
+    private var rLongPressTimer: Timer?
+    private var rLongPressFired: Bool = false
+    private let rLongPressInterval: TimeInterval = 0.5
     var icon: NSImage? {
         if self._icon == nil {
             self.updateControllerIcon()
@@ -149,6 +160,10 @@ class GameController {
             self?.rightStickPosHandler(pos: pos)
         }
 
+        controller.sensorHandler = { [weak self] in
+            self?.handleSensorData()
+        }
+
         controller.batteryChangeHandler = { [weak self] newState, oldState in
             self?.batteryChangeHandler(newState: newState, oldState: oldState)
         }
@@ -189,6 +204,16 @@ class GameController {
     }
     
     func buttonPressHandler(button: JoyCon.Button) {
+        if button == .R {
+            self.rLongPressFired = false
+            self.rLongPressTimer?.invalidate()
+            self.rLongPressTimer = Timer.scheduledTimer(withTimeInterval: self.rLongPressInterval, repeats: false) { [weak self] _ in
+                guard let self = self else { return }
+                self.rLongPressFired = true
+                self.postKey(keyCode: kVK_UpArrow, modifiers: .control, keyDown: true)
+            }
+            return
+        }
         guard let config = self.currentConfig[button] else { return }
         self.buttonPressHandler(config: config)
     }
@@ -247,8 +272,29 @@ class GameController {
     }
     
     func buttonReleaseHandler(button: JoyCon.Button) {
+        if button == .R {
+            self.rLongPressTimer?.invalidate()
+            self.rLongPressTimer = nil
+            if self.rLongPressFired {
+                self.postKey(keyCode: kVK_UpArrow, modifiers: .control, keyDown: false)
+            } else if let config = self.currentConfig[button] {
+                self.buttonPressHandler(config: config)
+                self.buttonReleaseHandler(config: config)
+            }
+            self.rLongPressFired = false
+            return
+        }
         guard let config = self.currentConfig[button] else { return }
         self.buttonReleaseHandler(config: config)
+    }
+
+    func postKey(keyCode: Int, modifiers: NSEvent.ModifierFlags, keyDown: Bool) {
+        DispatchQueue.main.async {
+            let source = CGEventSource(stateID: .hidSystemState)
+            let ev = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: keyDown)
+            ev?.flags = CGEventFlags(rawValue: CGEventFlags.RawValue(modifiers.rawValue))
+            ev?.post(tap: .cghidEventTap)
+        }
     }
     
     func buttonReleaseHandler(config: KeyMap) {
@@ -551,6 +597,73 @@ class GameController {
         self.controller?.setHCIState(state: .disconnect)
     }
     
+    // MARK: - IMU (pickup / shake)
+
+    private var imuLogCounter: Int = 0
+    static var imuMonitorEnabled: Bool = {
+        return ProcessInfo.processInfo.environment["JOYKEY_IMU_LOG"] != nil
+    }()
+
+    func handleSensorData() {
+        guard self.isEnabled, let controller = self.controller else { return }
+
+        let a = controller.acceleration
+        let g = controller.gyro
+        let accelMag = sqrt(Double(a.x * a.x + a.y * a.y + a.z * a.z))
+        let gyroMag = sqrt(Double(g.x * g.x + g.y * g.y + g.z * g.z))
+
+        let now = Date()
+        let currentlyStill = abs(accelMag - 1.0) < 0.1 && gyroMag < 30.0
+
+        if Self.imuMonitorEnabled {
+            self.imuLogCounter += 1
+            if self.imuLogCounter % 10 == 0 {
+                let state = currentlyStill ? "STILL" : "MOVE "
+                let marker = self.imuIsStill ? "[idle]" : "     "
+                fputs(String(format: "IMU %@ %@ |a|=%.3f |g|=%6.1f  a=(%+.2f,%+.2f,%+.2f) g=(%+6.1f,%+6.1f,%+6.1f)\n",
+                             state, marker, accelMag, gyroMag,
+                             Double(a.x), Double(a.y), Double(a.z),
+                             Double(g.x), Double(g.y), Double(g.z)),
+                      stderr)
+            }
+        }
+
+        if currentlyStill {
+            self.imuStillFrames += 1
+            if self.imuStillFrames >= 60 { self.imuIsStill = true }
+        } else {
+            if self.imuIsStill && now.timeIntervalSince(self.lastPickupTime) > 1.0 {
+                self.lastPickupTime = now
+                if Self.imuMonitorEnabled { fputs(">>> PICKUP detected -> 1111\n", stderr) }
+                DispatchQueue.main.async { [weak self] in
+                    self?.typeKey(keyCode: kVK_ANSI_1, times: 4)
+                }
+            }
+            self.imuIsStill = false
+            self.imuStillFrames = 0
+        }
+
+        if accelMag > 2.5 && now.timeIntervalSince(self.lastShakeTime) > 1.0 {
+            self.lastShakeTime = now
+            if Self.imuMonitorEnabled { fputs(">>> SHAKE  detected -> 2222\n", stderr) }
+            DispatchQueue.main.async { [weak self] in
+                self?.typeKey(keyCode: kVK_ANSI_2, times: 4)
+            }
+        }
+    }
+
+    func typeKey(keyCode: Int, times: Int) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for i in 0..<times {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(i) * 0.03) {
+                let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: true)
+                down?.post(tap: .cghidEventTap)
+                let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(keyCode), keyDown: false)
+                up?.post(tap: .cghidEventTap)
+            }
+        }
+    }
+
     // MARK: - Timer
 
     func updateAccessTime() {
